@@ -1,0 +1,4 @@
+pytorch=1.8.1
+torchvision=0.2.2
+pytorch-lightning=1.6.0
+pillow=6.2.1
