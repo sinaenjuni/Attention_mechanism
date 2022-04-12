@@ -169,7 +169,8 @@ def cli_main():
 
     trainer = pl.Trainer(max_epochs=1,
                          callbacks=[EarlyStopping(monitor='val_loss')],
-                         gpus=2)  # 0이면 no gpu, 1이상이면 해당 개수만큼의 gpu사용
+                         gpus=2
+                         )  # 0이면 no gpu, 1이상이면 해당 개수만큼의 gpu사용
     # 학습 과정에서 사용되는 파라미터들 정의
 
     trainer.fit(model, datamodule=dm)
