@@ -1,5 +1,5 @@
 """
-    Attention 101 > Dot-Product Attention
+    Transformer 101/Attention 101 > Dot-Product + Query, Key, Value + Multihead Attention
 
         - this code is for educational purpose.
         - the code is written for easy understanding not for optimized code.
@@ -9,88 +9,134 @@
 """
 
 # In this code, we will implement
-#   - Dot-Product attention mechanism
+#   - Scaled Dot-Product attention mechanism
+#   - Query Key Value attention
+#   - Multihead attention
 
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import math
 
-class DotAttention(nn.Module):
+
+def scaled_dot_product_attention(q: torch.Tensor,
+                                 k: torch.Tensor,
+                                 v: torch.Tensor,
+                                 mask: torch.Tensor = None,
+                                 dropout: float = 0.1,
+                                 ) -> torch.Tensor:
     """
-    Attention > Additive Attention > Bahdanau approach
-
-    Inputs:
-        query_vector  : [hidden_size]
-        multiple_items: [batch_size, num_of_items, hidden_size]
-    Returns:
-        blendded_vector:    [batch_size, item_vector hidden_size]
-        attention_scores:   [batch_size, num_of_items]
+        In here, we try to calculate all multi-heads attentions at once.
+        So, we assumed that the first dimension of q, k and v is B*num_heads=...
+            q : expect [..., query_seq_len, d_k]
+            k : expect [..., key_seq_len,   d_k]
+            v : expect [..., key_seq_len,   d_v]
+        mask : expect extended shaped [B, num_heads, query_seq_len, key_seq_len] 1.0 for attend elements, 0 for masking elements
+        dropout : expect float value.
     """
+    # for scaling
+    d_k = k.size()[-1]
+    # attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k) # [B, num_heads, query_seq_len, key_seq_len]
 
-    def __init__(self, item_dim, query_dim, attention_dim):
-        super(DotAttention, self).__init__()
-        self.item_dim = item_dim  # dim. of multiple item vector
-        self.query_dim = query_dim  # dim. of query vector
-        self.attention_dim = attention_dim  # dim. of projected item or query vector
+    attn = torch.matmul(q, k.transpose(-2, -1))
 
-        assert query_dim == item_dim, "Dot attention require dim. of query and dim. of item is same."
+    # masking
+    if mask != None:
+        inverted_mask = 1.0 - mask
+        inverted_mask = inverted_mask.masked_fill(inverted_mask.bool(), torch.finfo(attn.dtype).min)
 
-    def _calculate_reactivity(self, query_vector, multiple_items):
-        # 'dot' method try to get scalar value by dot operation
-        # see : [1,H] x [H,1] = [1,1] => [1] sclar value
-        query_vector = query_vector.unsqueeze(-1)  # [B,H] --> [B,H,1]
+        # broadcasting will be happened here
+        # [B, N, len_query, len_key] + [B, 1, 1, len_key] -->
+        attn = attn + inverted_mask  # checkout before and after attn[0][0][0], mask[0][0][0]
 
-        # [B,N,H] x [B,H,1] --> [B,N,1]
-        reactivity_scores = torch.bmm(multiple_items, query_vector)  # [B, N, 1]
-        reactivity_scores = reactivity_scores.squeeze(-1)  # [B,N]
-        return reactivity_scores
+    # calculate softmax
+    attention_weights = F.softmax(attn, dim=-1)  # over key dimension   # [..., seq_len, d_k]
 
-    def forward(self, query_vector, multiple_items, mask):
-        """
-        Inputs:
-            query_vector:   [query_vector hidden_size]
-            multiple_items: [batch_size, num_of_items, item_vector hidden_size]
-            mask:           [batch_size, num_of_items, num_of_items]  1 for valid item, 0 for invalid item
-        Returns:
-            blendded_vector:    [batch_size, item_vector hidden_size]
-            attention_scores:   [batch_size, num_of_items]
-        """
-        assert mask is not None, "mask is required"
+    # Original Paper didn't mention about dropout on attention weights.
+    # But many working architectures use dropout on attentions
+    # so, in here we will apply dropout on scores
+    if type(dropout) == float:
+        attention_weights = F.dropout(attention_weights, dropout)
+    else:
+        attention_weights = dropout(attention_weights)
 
-        # B : batch_size, N : number of multiple items, H : hidden size of item
-        B, N, H = multiple_items.size()
-
-        # Three Steps
-        # 1) [reactivity] try to check the reactivity with ( item_t and query_vector ) N times
-        # 2) [masking]    try to penalize invalid items such as <pad>
-        # 3) [attention]  try to get proper attention scores (=propability form) over the reactivity scores
-        # 4) [blend]      try to blend multiple items with attention scores
-
-        # Step-1) reactivity
-        reactivity_scores = self._calculate_reactivity(query_vector, multiple_items)
-
-        # Step-2) masking
-        # The mask marks valid positions so we invert it using `mask & 0`.
-        # detail : check the masked_fill_() of pytorch
-        reactivity_scores.data.masked_fill_(mask == 0, -float('inf'))
-
-        # Step-3) attention score
-        attention_scores = F.softmax(reactivity_scores, dim=1)  # over the item dimensions
-
-        # Step-4) blend multiple items
-        # merge by weighted sum
-        attention_scores = attention_scores.unsqueeze(1)  # [B, 1, #_of_items]
-
-        # [B, 1, #_of_items] * [B, #_of_items, dim_of_item] --> [B, 1, dim_of_item]
-        blendded_vector = torch.matmul(attention_scores, multiple_items)
-        blendded_vector = blendded_vector.squeeze(1)  # [B, dim_of_item]
-
-        return blendded_vector, attention_scores
+    # blending
+    output = torch.matmul(attention_weights, v)
+    return output, attention_weights
 
 
-## ------------------------------------------------------------------------ ##
+class Attention(nn.Module):
+    ## this Attention implementation is almost identical to original transformer paper.
+    def __init__(self, d_model, num_heads, dropout=0.1, use_bias=True):
+        super(Attention, self).__init__()
+        assert d_model % num_heads == 0
+        self.num_heads = num_heads
+
+        # We assume d_v always equals d_k
+        self.d_k = d_model // num_heads  # ex) d_model = 512, num_head = 8 --> d_k = 64
+        self.d_v = d_model // num_heads  # ex) d_model = 512, num_head = 8 --> d_v = 64
+
+        # why * num_head? --> preapre N heads's input
+        # d_model = self.d_k * self.num_head
+        #
+        # there are variations to use 'biases' in q,k,v, and o
+        # but, in this implementation, we will use bias
+        self.wq = nn.Linear(d_model, d_model, bias=use_bias)
+        self.wk = nn.Linear(d_model, d_model, bias=use_bias)
+        self.wv = nn.Linear(d_model, d_model, bias=use_bias)
+
+        # dropout
+        self.dropout = nn.Dropout(dropout)
+
+        # to make output
+        # we follow original transformer paper :
+        # in the paper, they mentioned WO for projection on concat vector.
+        self.wo = nn.Linear(d_model, d_model, bias=use_bias)
+
+    def split_heads(self, x, batch_size):
+        # split the projected dimension
+        # [B, seq_len, heads * d_k ] --> [B, heads, seq_len, d_k]
+        x = x.view(batch_size, -1, self.num_heads, self.d_k)  # to be [B, seq_len, heads, d_k]
+        x = x.transpose(1, 2).contiguous()  # to be [B, heads, seq_len, d_k]
+        return x
+
+    def forward(self, query, key, value, mask=None):
+        q = self.wq(query)  # d_k --> d_k*num_head
+        k = self.wk(key)  # d_k --> d_k*num_head
+        v = self.wv(value)  # d_k --> d_k*num_head
+
+        # shape change to [B, heads, seq_len, d_k]
+        _, qS = q.size()[0], q.size()[1]  # qS = query_seq_len
+        B, S = k.size()[0], k.size()[1]  # S  = key_seq_len
+
+        q = self.split_heads(q, B)  # [B, num_heads, query_seq_len, d_k]
+        k = self.split_heads(k, B)  # [B, num_heads, key_seq_len,   d_k]
+        v = self.split_heads(v, B)  # [B, num_heads, key_seq_len,   d_k]
+
+        # scaled dot-product attention
+        # scaled_attention  = [..., query_seq_len, d_k]
+        # attention_weights = [..., query_seq_len, key_seq_len]
+        scaled_attention, attention_weights = scaled_dot_product_attention(q, k, v, mask, self.dropout)
+
+        # [Concat Process - for merging multiheads]
+        # recover the tensor form
+        scaled_attention = scaled_attention.transpose(1, 2)  # to be [B, query_seq_len, num_heads, d_k]
+
+        # concat
+        concat_attention = scaled_attention.reshape(B, qS, -1)  # to be [B, query_seq_len, (num_heads*d_k)=d_model]
+
+        # to output
+        output = self.wo(concat_attention)
+
+        # output : # [B, query_seq_len, d_model]
+        # attention_weights : [B, num_heads, query_seq_len, key_seq_len]
+        return output, attention_weights
+
+    ## ------------------------------------------------------------------------ ##
+
+
 ## Training and Testing with toy dataset                                    ##
 ## ------------------------------------------------------------------------ ##
 import pytorch_lightning as pl
@@ -231,6 +277,7 @@ class Attention_Number_Finder(pl.LightningModule):
                  input_vocab_size,
                  output_vocab_size,
                  d_model,  # dim. in attemtion mechanism
+                 num_heads,  # number of heads,
                  padding_idx,
                  # optiimzer setting
                  learning_rate=1e-3):
@@ -254,9 +301,10 @@ class Attention_Number_Finder(pl.LightningModule):
                                )
 
         # attention mechanism
-        self.att = DotAttention(item_dim=self.hparams.d_model,
-                                query_dim=self.hparams.d_model,
-                                attention_dim=self.hparams.d_model)
+        self.att = Attention(
+            d_model=self.hparams.d_model,
+            num_heads=self.hparams.num_heads
+        )
 
         # [to output]
         self.to_output = nn.Linear(self.hparams.d_model, self.hparams.output_vocab_size)  # D -> a single number
@@ -274,15 +322,24 @@ class Attention_Number_Finder(pl.LightningModule):
         seq_encs, _ = self.encoder(seq_embs)  # [B, max_seq_len, enc_dim*2]  since we have 2 layers
 
         # with query (context)
-        query = self.digit_emb(q_id)  # [B, query_dim]
+        query = self.digit_emb(q_id)  # [B, emb_dim=d_model]
+        query = query.unsqueeze(1)  # [B, 1, d_model]  <- dummy dimension
 
         # dynamic encoding-summarization (blending)
-        multiple_items = seq_encs
+        multiple_items = seq_encs  # [B, max_seq_len, d_model]
 
-        blendded_vector, attention_scores = self.att(query, multiple_items, mask=weight)  # [B, #_of_items]
-        # blendded_vector  : [B, dim_of_sequence_enc]
-        # attention_scores : [B, query_len, N]
+        # masking - shape change
+        #   mask always applied to the last dimension explicitly.
+        #   so, we need to prepare good shape of mask
+        #   to prepare [B, dummy_for_heads, dummy_for_query, dim_for_key_dimension]
+        mask = weight[:, None, None, :]  # [B, 1, 1, max_seq_len]
 
+        blendded_vector, attention_scores = self.att(query=query,
+                                                     key=multiple_items,
+                                                     value=multiple_items,
+                                                     mask=mask)
+        # blendded_vector  : [B, query_seq_len=1, d_model]
+        # attention_scores : [B, num_heads, query_seq_len=1, max_seq_len]
         blendded_vector = blendded_vector.squeeze(1)  # since we use a single query
 
         # To output
@@ -338,58 +395,8 @@ class Attention_Number_Finder(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group("ATTENTION")
-        parser.add_argument('--learning_rate', type=float, default=0.00001)
+        parser.add_argument('--learning_rate', type=float, default=0.0001)
         return parent_parser
-
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-plt.rcParams['figure.figsize'] = [10, 8]
-
-
-def check_attention(model, ex, input_vocab, output_vocab):
-    seq_ids, q_id, weights, y_id = ex
-    seq_ids = seq_ids.to(model.device)
-    q_id = q_id.to(model.device)
-    weights = weights.to(model.device)
-
-    import os
-    os.makedirs('./output_figs/Dot', exist_ok=True)
-
-    import pandas as pd
-    # predictions
-    with torch.no_grad():
-        logits, att_scores = model(seq_ids, q_id, weights)  # [B, output_vocab_size]
-
-        prob = F.softmax(logits, dim=-1)
-        y_id_pred = prob.argmax(dim=-1)
-
-        for idx, (a_seq_ids, a_q_id, a_weights, a_y_id, a_y_id_pred, a_att_scores) in enumerate(
-                zip(seq_ids, q_id, weights, y_id, y_id_pred, att_scores)):
-            N = a_weights.sum().item()
-
-            input_sym = [input_vocab[i.item()] for i in a_seq_ids[:N]]
-            q_sym = input_vocab[a_q_id.item()]
-
-            ref_y_sym = output_vocab[a_y_id_pred.item()]
-            pred_y_sym = output_vocab[a_y_id_pred.item()]
-
-            scores = a_att_scores.cpu().detach().numpy()[0][:N].tolist()
-
-            ## heatmap
-            data = {'scores': []}
-            for word, score in zip(input_sym, scores):
-                data['scores'].append(score)
-                df = pd.DataFrame(data)
-            df.index = input_sym
-
-            plt.figure()
-            # sns.set(rc = {'figure.figsize':(2,8)})
-            sns.heatmap(df, cmap='RdYlGn_r')
-            plt.title(f'Finding the first larger value than query={q_sym}, ref={ref_y_sym}, pred={pred_y_sym}',
-                      fontsize=10)
-            plt.savefig(os.path.join('./output_figs/Dot', f'{idx}.png'))
 
 
 from argparse import ArgumentParser
@@ -405,6 +412,7 @@ def cli_main():
     parser = ArgumentParser()
     parser.add_argument('--batch_size', default=200, type=int)
     parser.add_argument('--d_model', default=512, type=int)  # dim. for attention model
+    parser.add_argument('--num_heads', default=8, type=int)  # number of attention heads
 
     parser = pl.Trainer.add_argparse_args(parser)
     parser = Attention_Number_Finder.add_model_specific_args(parser)
@@ -422,6 +430,7 @@ def cli_main():
     model = Attention_Number_Finder(dm.input_vocab_size,
                                     dm.output_vocab_size,
                                     args.d_model,  # dim. in attemtion mechanism
+                                    args.num_heads,  # number of heads in attention
                                     dm.padding_idx,
                                     args.learning_rate)
 
@@ -429,7 +438,7 @@ def cli_main():
     # training
     # ------------
     trainer = pl.Trainer(
-        max_epochs=60,
+        max_epochs=6,
         callbacks=[EarlyStopping(monitor='val_loss')],
         gpus=1  # if you have gpu -- set number, otherwise zero
     )
@@ -441,14 +450,7 @@ def cli_main():
     result = trainer.test(model, test_dataloaders=dm.test_dataloader())
     print(result)
 
-    # {'test_acc': 0.9039999842643738, 'test_loss': 0.2998247742652893}
-
-    # ------------
-    # Check the attention scores to attend on multiple items
-    # ------------
-    # model = Attention_Number_Finder.load_from_checkpoint('./lightning_logs/version_15/checkpoints/epoch=0-step=179.ckpt').to('cuda:0')
-    ex_batch = iter(dm.test_dataloader()).next()
-    check_attention(model, ex_batch, dm.input_r_vocab, dm.output_r_vocab)
+    # {'test_acc': 0.9998000264167786, 'test_loss': 0.0018601451301947236}
 
 
 if __name__ == '__main__':
