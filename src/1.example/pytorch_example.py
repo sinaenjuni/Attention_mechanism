@@ -7,6 +7,8 @@ from torchvision import transforms
 from torchvision.transforms import Compose, ToTensor, Normalize
 
 import pytorch_lightning as pl
+from pytorch_lightning.strategies.ddp import DDPStrategy
+
 from torchmetrics import functional as FM
 
 
@@ -41,12 +43,16 @@ class MNISTDataset(Dataset):
 
 # 하나의 데이터 셋들을 배치 단위로 만드는 역할
 class MNISTDataModule(pl.LightningDataModule):
-    def __init__(self, batch_size=32):
+    def __init__(self, batch_size):
         super().__init__()
+        self.save_hyperparameters()
+        # save_hyperparameters()를 해야 log에 parameter들이 기록되고,
+        # 동시에 self.hparams로 변수 접근이 가능하다.
 
         ## prepare_data(), setup() 이라는 특별한 함수가 있음, 이건 알아서 찾아보기
 
         self.batch_size = batch_size
+        # self.batch_size = self.hparams.batch_size
 
         self.all_train_dataset = MNISTDataset(True)
         self.all_test_dataset = MNISTDataset(False)
@@ -57,13 +63,13 @@ class MNISTDataModule(pl.LightningDataModule):
         self.train_dataset, self.valid_dataset = random_split(self.all_train_dataset, [tr, va])
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, persistent_workers=True)
 
     def val_dataloader(self):
-        return DataLoader(self.valid_dataset, batch_size=self.batch_size)
+        return DataLoader(self.valid_dataset, batch_size=self.batch_size, num_workers=4, persistent_workers=True)
 
     def test_dataloader(self):
-        return DataLoader(self.all_test_dataset, batch_size=self.batch_size)
+        return DataLoader(self.all_test_dataset, batch_size=self.batch_size, num_workers=4, persistent_workers=True)
     # def teardown(self):
     #     ...
 
@@ -133,7 +139,8 @@ class MLP_MNIST_Classifier(pl.LightningModule):
         return metrics
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        optimizer = torch.optim.Adam(self.parameters(),
+                                     lr=self.hparams.learning_rate)
         return optimizer
 
     @staticmethod
@@ -148,28 +155,34 @@ from pytorch_lightning.callbacks import EarlyStopping
 
 
 def cli_main():
-    pl.seed_everything(1234)  # 다른 환경에서도 동일한 성능을 보장하기 위한 random seed 초기화
+    pl.seed_everything(1234)
+    # 다른 환경에서도 동일한 성능을 보장하기 위한 random seed 초기화
+    # 맹신하지 말것!
 
     parser = ArgumentParser()
-    parser.add_argument("--barch_size", default=200, type=int)
+    parser.add_argument("--batch_size", default=200, type=int)
     # 학습에 사용되는 파라미터 파싱
-    # 필요하면 더 만들면 됌
 
-    parser = pl.Trainer.add_argparse_args(parser)
-    # pytorch lightning에 파라미터 내용 전달
     parser = MLP_MNIST_Classifier.add_model_specific_args(parser)
-    # 모델에 마다 다른 파라미터 전달
+    # model에 있는 hyper-parameter를 parser에 등록하는 과정
+    # 모델에 정의된 hyper-parameter를 가져오는 과정이다.
+
+    # parser = pl.Trainer.add_argparse_args(parser)
+    # pytorch lightning에 hyper-parameter 전달
+
     args = parser.parse_args('')
 
     dm = MNISTDataModule.from_argparse_args(args)
     # 데이터 모듈에 파라미터 전달
-
+    print(dm.batch_size)
     model = MLP_MNIST_Classifier(args.learning_rate)
     # 학습 모델 정의
 
     trainer = pl.Trainer(max_epochs=1,
+                         strategy=DDPStrategy(find_unused_parameters=False),
+                         accelerator='gpu',
                          callbacks=[EarlyStopping(monitor='val_loss')],
-                         gpus=2
+                         gpus=-1
                          )  # 0이면 no gpu, 1이상이면 해당 개수만큼의 gpu사용
     # 학습 과정에서 사용되는 파라미터들 정의
 
