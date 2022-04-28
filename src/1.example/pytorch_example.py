@@ -83,7 +83,7 @@ class MNISTDataModule(pl.LightningDataModule):
 # 아래에 구현되어 있는 함수들은 모두 pl에 정의되어 있는 함수들로 기능에 따라 자동으로 매핑되기 때문에
 # 구현 해주어야 한다.
 class MLP_MNIST_Classifier(pl.LightningModule):
-    def __init__(self, learning_rate=1e-3):
+    def __init__(self, learning_rate=1e-3, **kwargs):
         super().__init__()
         self.save_hyperparameters()
         """
@@ -91,7 +91,7 @@ class MLP_MNIST_Classifier(pl.LightningModule):
         self.hparams.learning_rate 를 통해서 참조가 가능
         또한 check point에 자동을 저장된다.
         """
-
+        print(self.hparams)
         self.fc1 = nn.Linear(28 * 28, 512)
         self.fc2 = nn.Linear(512, 256)
         self.fc3 = nn.Linear(256, 10)
@@ -160,7 +160,7 @@ def cli_main():
     # 맹신하지 말것!
 
     parser = ArgumentParser()
-    parser.add_argument("--batch_size", default=200, type=int)
+    parser.add_argument("--batch_size", default=10, type=int)
     # 학습에 사용되는 파라미터 파싱
 
     parser = MLP_MNIST_Classifier.add_model_specific_args(parser)
@@ -175,7 +175,7 @@ def cli_main():
     dm = MNISTDataModule.from_argparse_args(args)
     # 데이터 모듈에 파라미터 전달
     print(dm.batch_size)
-    model = MLP_MNIST_Classifier(args.learning_rate)
+    model = MLP_MNIST_Classifier(**vars(args))
     # 학습 모델 정의
 
     trainer = pl.Trainer(max_epochs=1,
